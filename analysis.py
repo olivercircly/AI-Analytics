@@ -45,6 +45,25 @@ class Result:
     portfolio: dict
 
 
+def group_rolling(
+    values: pd.Series,
+    groups,
+    window: int,
+    stat: str = "mean",
+    center: bool = False,
+    min_periods: int | None = None,
+) -> pd.Series:
+    """Rolling statistic within each group, computed in one vectorised pass
+    (much faster than groupby().transform(lambda x: x.rolling(...)))."""
+    out = getattr(
+        values.groupby(groups, sort=False).rolling(
+            window, center=center, min_periods=min_periods
+        ),
+        stat,
+    )()
+    return out.droplevel(list(range(out.index.nlevels - 1))).reindex(values.index)
+
+
 def to_period(dates: pd.Series, freq: str) -> pd.Series:
     dates = pd.to_datetime(dates).dt.normalize()
     if freq == "D":
@@ -113,6 +132,11 @@ def build_panel(sales: pd.DataFrame, promos: pd.DataFrame, s: Settings) -> pd.Da
         .groupby(keys + ["period"], as_index=False)["qty"]
         .sum()
     )
+    if s.freq != "D":
+        # drop partial weeks at both ends; a week counts as complete if data reaches its
+        # Saturday (many shops are closed on Sundays, so there may be no Sunday rows)
+        lo, hi = sales["date"].min(), sales["date"].max()
+        agg = agg[(agg["period"] >= lo) & (agg["period"] + pd.Timedelta(days=5) <= hi)]
 
     # complete grid: missing periods are zero sales, but only between first and last sale
     periods = pd.date_range(agg["period"].min(), agg["period"].max(), freq=s.freq)
@@ -135,7 +159,11 @@ def build_panel(sales: pd.DataFrame, promos: pd.DataFrame, s: Settings) -> pd.Da
 
     panel = _attach_promos(panel, promos, s)
     panel["promo"] = panel["promo_days"] > 0
-    panel["series"] = panel[keys].astype(str).agg(" @ ".join, axis=1)
+    panel["series"] = (
+        panel["product"].astype(str)
+        if len(keys) == 1  # vectorised; a row-wise
+        else panel["product"].astype(str) + " @ " + panel["location"].astype(str)
+    )  # join takes minutes
     return panel.sort_values(keys + ["period"]).reset_index(drop=True)
 
 
@@ -147,26 +175,34 @@ def add_baseline(panel: pd.DataFrame, s: Settings) -> pd.DataFrame:
     otherwise a shifted promo effect would leak into the baseline."""
     keys = s.keys
     guard = 2 * s.max_lag + 1
-    near_promo = (
-        panel.groupby(keys, sort=False)["promo"]
-        .transform(
-            lambda x: x.astype(float).rolling(guard, center=True, min_periods=1).max()
-        )
-        .astype(bool)
-    )
-    panel = panel.assign(clean=panel["qty"].where(~near_promo))
+    groups = [panel[k] for k in keys]
+    near_promo = group_rolling(
+        panel["promo"].astype(float), groups, guard, "max", center=True, min_periods=1
+    ).astype(bool)
     min_obs = max(2, s.baseline_window // 3)
-    panel["baseline"] = panel.groupby(keys, sort=False)["clean"].transform(
-        lambda x: x.rolling(s.baseline_window, center=True, min_periods=min_obs)
-        .median()
-        .interpolate(limit_direction="both")
+    rolled = group_rolling(
+        panel["qty"].where(~near_promo),
+        groups,
+        s.baseline_window,
+        "median",
+        center=True,
+        min_periods=min_obs,
+    )
+    # fill gaps: linear inside an article's history, nearest value at its edges
+    fwd = rolled.groupby(groups, sort=False).ffill()
+    bwd = rolled.groupby(groups, sort=False).bfill()
+    inside = rolled.interpolate(
+        limit_area="inside"
+    )  # interior gaps only touch the same article
+    panel = panel.assign(
+        baseline=inside.where(fwd.notna() & bwd.notna(), fwd.fillna(bwd))
     )
     level = panel.groupby(keys, sort=False)["qty"].transform("mean").replace(0, np.nan)
     panel["uplift"] = panel["qty"] - panel["baseline"]
     panel["norm_uplift"] = (
         panel["uplift"] / level
     )  # in multiples of the series' average sales
-    return panel.drop(columns="clean")
+    return panel
 
 
 # ------------------------------------------------------------------ shift tests
@@ -199,11 +235,9 @@ def promo_starts(
     """All promo starts, and 'isolated' ones with no promo in the preceding periods."""
     g = panel.groupby(s.keys, sort=False)["promo"]
     starts = panel["promo"] & ~g.shift(1, fill_value=False).astype(bool)
-    recent = g.transform(
-        lambda x: x.shift(1, fill_value=False)
-        .astype(float)
-        .rolling(quiet_before, min_periods=1)
-        .max()
+    prev = g.shift(1, fill_value=False).astype(float)
+    recent = group_rolling(
+        prev, [panel[k] for k in s.keys], quiet_before, "max", min_periods=1
     ).astype(bool)
     return starts, starts & ~recent
 
