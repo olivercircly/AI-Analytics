@@ -23,6 +23,7 @@ GRANULARITY = {"Weekly": ("W-MON", "week", 13, 3), "Daily": ("D", "day", 35, 14)
 def run(
     cid: str,
     start: date,
+    promo_window: str,
     freq: str,
     by_location: bool,
     max_lag: int,
@@ -31,16 +32,24 @@ def run(
     low: float,
     high: float,
     demo: bool,
-) -> an.Result:
+) -> tuple[an.Result, dict]:
     if demo:
         from demo import make_demo_data
 
         sales, promos = make_demo_data()
         sales = sales[sales["date"] >= pd.Timestamp(start)]
+        info = {"promo_rows": len(promos), "secondary_rows": 0}
     else:
         import queries as q  # imported lazily so demo mode works without DB credentials
 
-        sales, promos = q.load_sales(cid, start), q.load_promos(cid, start)
+        raw = q.load_promos(cid, start)
+        info = {
+            "promo_rows": len(raw),
+            "secondary_rows": int(raw["secondary_start"].notna().sum()),
+        }
+        sales, promos = q.label_articles(
+            q.load_sales(cid, start), q.select_window(raw, promo_window)
+        )
     settings = an.Settings(
         freq=freq,
         by_location=by_location,
@@ -50,7 +59,7 @@ def run(
         low_dependency=low,
         high_dependency=high,
     )
-    return an.analyse(sales, promos, settings)
+    return an.analyse(sales, promos, settings), info
 
 
 def describe_lag(k: float, unit: str) -> str:
@@ -72,6 +81,16 @@ with st.sidebar:
         )
         cid = st.text_input("Customer ID (cid)", value=st.query_params.get("cid", ""))
         start = st.date_input("History from", value=date(2022, 1, 1))
+        promo_window = st.radio(
+            "Promo dates to test against",
+            ["primary", "secondary"],
+            format_func=lambda w: {
+                "primary": "Primary (validFrom–validTo)",
+                "secondary": "Secondary (retail promo period)",
+            }[w],
+            help="For producer customers the primary window is the ordering period and the "
+            "secondary window is the shelf promo at the retailer.",
+        )
         granularity = st.radio(
             "Granularity",
             list(GRANULARITY),
@@ -107,9 +126,10 @@ if not demo:
     st.query_params["cid"] = cid  # makes the URL shareable
 
 try:
-    res = run(
+    res, info = run(
         cid,
         start,
+        promo_window,
         freq,
         by_location,
         max_lag,
@@ -125,10 +145,19 @@ except ValueError as err:
 
 pf, m, panel = res.portfolio, res.metrics, res.panel
 st.title("Promo analytics")
-st.caption("Demo data" if demo else f"Customer {cid}")
+st.caption(
+    "Demo data"
+    if demo
+    else f"Customer {cid} · {info['promo_rows']:,} promotion rows, "
+    f"{info['secondary_rows']:,} with a secondary (retail) window · testing the {promo_window} window"
+)
+if promo_window == "secondary" and not demo and info["secondary_rows"] == 0:
+    st.warning(
+        "This customer has no secondary promo windows. Switch to the primary window."
+    )
 
-tab_overview, tab_dep, tab_shift, tab_series, tab_schema = st.tabs(
-    ["Overview", "Promo dependency", "Promo shift", "Series explorer", "Schema"]
+tab_overview, tab_dep, tab_shift, tab_series = st.tabs(
+    ["Overview", "Promo dependency", "Promo shift", "Series explorer"]
 )
 
 # --------------------------------------------------------------------- overview
@@ -185,6 +214,12 @@ with tab_overview:
             )
     else:
         notes.append("Promo effects line up with the recorded promo dates.")
+    if promo_window == "secondary":
+        notes.append(
+            "You are testing against the retail shelf period. For a producer, orders "
+            "*before* it are expected; compare the shift with the gap between the primary "
+            "and secondary windows to check the stored ordering window is right."
+        )
     st.markdown("\n\n".join(notes))
 
     st.subheader("Which shift explains the uplift best?")
@@ -363,7 +398,7 @@ with tab_shift:
                 )
                 st.dataframe(by_loc, width="stretch")
                 st.caption(
-                    "Locations with a consistent negative shift are likely distributors or DCs."
+                    "Accounts with a consistent negative shift are likely distributors or DCs."
                 )
 
 # --------------------------------------------------------------- series explorer
@@ -432,24 +467,3 @@ with tab_series:
         ),
         width="stretch",
     )
-
-# ------------------------------------------------------------------------ schema
-
-with tab_schema:
-    if demo:
-        st.info("Switch off demo data to browse the database schema.")
-    else:
-        import queries as q
-
-        schema = q.describe_schema()
-        table = st.selectbox(
-            "Table",
-            schema["table_name"].unique(),
-            index=int((schema["table_name"].unique() == "sales").argmax()),
-        )
-        st.dataframe(
-            schema[schema["table_name"] == table], hide_index=True, width="stretch"
-        )
-        st.caption(
-            "Map these columns in SALES_SQL and PROMO_SQL at the top of queries.py."
-        )
