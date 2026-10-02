@@ -5,3 +5,4 @@ numpy
 sqlalchemy>=2
 mysql-connector-python
 python-dotenv
+holidays

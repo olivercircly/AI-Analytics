@@ -53,6 +53,25 @@ PROMO_SQL = sa.text(f"""
       AND p.deleted_at IS NULL
 """)
 
+# Data quality: one row per sales hour x arrival delay. Deleted rows are included on
+# purpose (counted in deleted_rows). No '%' in the SQL: it would clash with the
+# driver's parameter style.
+QUALITY_SQL = sa.text(f"""
+    SELECT
+        DATE_ADD(DATE(s.orderDate), INTERVAL HOUR(s.orderDate) HOUR)              AS ts,
+        FLOOR(TIMESTAMPDIFF(HOUR, s.orderDate, s.created_at) / 6) * 6             AS lag_hours,
+        COUNT(*)                                                                  AS n_rows,
+        SUM(s.quantity < 0)                                                       AS negative_rows,
+        SUM(s.quantity = 0)                                                       AS zero_rows,
+        SUM(s.updated_at > s.created_at + INTERVAL 1 MINUTE)                      AS updated_rows,
+        SUM(s.deleted_at IS NOT NULL)                                             AS deleted_rows
+    FROM {SCHEMA}.sales s
+    WHERE s.cid = :cid
+      AND s.orderDate >= :start
+      AND s.type = 'sales'
+    GROUP BY 1, 2
+""")
+
 PROMO_WINDOWS = {
     "primary": "Primary (validFrom–validTo)",
     "secondary": "Secondary (retail promo period)",
@@ -96,6 +115,16 @@ def load_promos(cid: str, start: date) -> pd.DataFrame:
     df["product"] = df["product"].astype(str)
     df["location"] = df["location"].where(df["location"].notna(), None)
     return df
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading data-quality statistics…")
+def load_quality(cid: str, start: date) -> pd.DataFrame:
+    df = _read(QUALITY_SQL, cid=cid, start=start)
+    df["date"] = _to_local_date(df["ts"])
+    counts = ["n_rows", "negative_rows", "zero_rows", "updated_rows", "deleted_rows"]
+    df[counts] = df[counts].apply(pd.to_numeric).fillna(0).astype(int)
+    df["lag_hours"] = pd.to_numeric(df["lag_hours"]).clip(lower=0)
+    return df.groupby(["date", "lag_hours"], as_index=False)[counts].sum()
 
 
 def select_window(promos: pd.DataFrame, window: str) -> pd.DataFrame:
