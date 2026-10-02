@@ -1,0 +1,10 @@
+# Only the dark theme is customised; setting anything under [theme.dark] (rather than
+# [theme] or [theme.sidebar]) keeps Streamlit's Light / Dark / System switcher.
+[theme.dark]
+backgroundColor = "#08090c"  # darker than Streamlit's default #0e1117, lighter than the sidebar
+
+[theme.dark.sidebar]
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#262626"  # inputs, toggles and the expander inside the sidebar
+textColor = "#f5f5f5"
+borderColor = "#3a3a3a"
