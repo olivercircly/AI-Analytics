@@ -1,6 +1,7 @@
 """Data loading and cached analysis results.
 
-src = (cid, start, promo_window, demo) identifies the data; everything is cached on it.
+src = (cid, start, promo_window, demo) identifies a customer's data, asrc =
+(article_id, start, promo_window, demo) a single article's; everything is cached on them.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 import analysis as an
+import anomalies as ab
 import benchmark as bm
 import calendar_effects as ce
 import data_quality as dq
@@ -108,3 +110,49 @@ def dq_result(src, country: str) -> dict:
 @st.cache_data(ttl=3600, show_spinner="Backtesting benchmark forecasts…")
 def bench_result(src, freq: str, horizon: int, test_periods: int) -> dict:
     return bm.backtest(panel(src, freq), freq, horizon, test_periods)
+
+
+# ------------------------------------------------------------------ article mode
+# asrc = (article_id, start, promo_window, demo) identifies one article's data.
+
+
+@st.cache_resource(ttl=3600, show_spinner="Loading article…")
+def load_article(asrc: tuple) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    article_id, start, promo_window, demo = asrc
+    if demo:
+        from demo import make_demo_data
+
+        sales, promos = make_demo_data()
+        end = sales["date"].max()
+        sales = sales[(sales["product"] == article_id) & (sales["qty"] != 0)]
+        sales = sales[sales["date"] >= pd.Timestamp(start)]
+        return (
+            sales.assign(article_number=sales["product"]),
+            promos[promos["product"] == article_id],
+            {"cid": "demo", "promo_rows": int((promos["product"] == article_id).sum()),
+             "secondary_rows": 0, "end": end},
+        )
+    import queries as q
+
+    sales, raw, cid = q.load_article(article_id, start)
+    info = {
+        "cid": cid,
+        "promo_rows": len(raw),
+        "secondary_rows": int(raw["secondary_start"].notna().sum()) if len(raw) else 0,
+        "end": pd.Timestamp.now(tz=q.LOCAL_TZ).tz_localize(None).normalize(),
+    }
+    promos = (
+        q.select_window(raw, promo_window)
+        if len(raw)
+        else pd.DataFrame(columns=["product", "location", "promo_start", "promo_end"])
+    )
+    return sales, promos, info
+
+
+@st.cache_data(ttl=3600, show_spinner="Looking for anomalies…")
+def article_result(asrc, freq, country, max_lag, window, min_events) -> dict:
+    sales, promos, info = load_article(asrc)
+    years = list(range(sales["date"].min().year, sales["date"].max().year + 1))
+    holidays = ce.holiday_calendar(country, years)["date"]
+    s = an.Settings(freq=freq, max_lag=max_lag, baseline_window=window, min_events=min_events)
+    return ab.analyse(sales, promos, s, holidays, end=info["end"])

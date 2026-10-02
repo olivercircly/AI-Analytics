@@ -72,6 +72,41 @@ QUALITY_SQL = sa.text(f"""
     GROUP BY 1, 2
 """)
 
+# Article mode: one article across all its accounts. articleId has its own index and
+# belongs to exactly one customer, so no cid is needed to find it.
+ARTICLE_SALES_SQL = sa.text(f"""
+    SELECT
+        s.orderDate                   AS ts,
+        CAST(s.cid AS CHAR)           AS cid,
+        CAST(s.articleId AS CHAR)     AS product,
+        MIN(s.articleNumber)          AS article_number,
+        CAST(s.accountId AS CHAR)     AS location,
+        SUM(s.quantity)               AS qty
+    FROM {SCHEMA}.sales s
+    WHERE s.articleId = :article_id
+      AND s.orderDate >= :start
+      AND s.type = 'sales'
+      AND s.deleted_at IS NULL
+    GROUP BY s.orderDate, s.cid, s.articleId, s.accountId
+""")
+
+ARTICLE_PROMO_SQL = sa.text(f"""
+    SELECT
+        CAST(p.articleId AS CHAR)     AS product,
+        CAST(p.accountId AS CHAR)     AS location,
+        p.validFrom                   AS primary_start,
+        p.validTo                     AS primary_end,
+        p.validFromSecondary          AS secondary_start,
+        p.validToSecondary            AS secondary_end,
+        p.externalPromotionID         AS promo_id,
+        p.type, p.strength, p.placement, p.region, p.targetGroup
+    FROM {SCHEMA}.promotions p
+    WHERE p.cid = :cid
+      AND p.articleId = :article_id
+      AND p.validTo >= :start
+      AND p.deleted_at IS NULL
+""")
+
 PROMO_WINDOWS = {
     "primary": "Primary (validFrom–validTo)",
     "secondary": "Secondary (retail promo period)",
@@ -125,6 +160,27 @@ def load_quality(cid: str, start: date) -> pd.DataFrame:
     df[counts] = df[counts].apply(pd.to_numeric).fillna(0).astype(int)
     df["lag_hours"] = pd.to_numeric(df["lag_hours"]).clip(lower=0)
     return df.groupby(["date", "lag_hours"], as_index=False)[counts].sum()
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading article…")
+def load_article(article_id: str, start: date) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
+    """Sales and all promotion rows of one article, plus the customer it belongs to."""
+    df = _read(ARTICLE_SALES_SQL, article_id=article_id, start=start)
+    if df.empty:
+        return df.assign(date=pd.NaT), pd.DataFrame(), None
+    df["date"] = _to_local_date(df["ts"])
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    df["location"] = df["location"].fillna("all").astype(str)
+    df["article_number"] = df["article_number"].astype(str).str.strip()
+    # articleId belongs to one customer; if that ever breaks, use the one with most rows
+    cid = df["cid"].value_counts().idxmax()
+    df = df[df["cid"] == cid]
+    promos = _read(ARTICLE_PROMO_SQL, cid=cid, article_id=article_id, start=start)
+    for col in ["primary_start", "primary_end", "secondary_start", "secondary_end"]:
+        promos[col] = _to_local_date(promos[col])
+    promos["product"] = promos["product"].astype(str)
+    promos["location"] = promos["location"].where(promos["location"].notna(), None)
+    return df[["date", "product", "article_number", "location", "qty"]], promos, cid
 
 
 def select_window(promos: pd.DataFrame, window: str) -> pd.DataFrame:

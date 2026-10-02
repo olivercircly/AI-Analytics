@@ -58,3 +58,19 @@ class Context:
         """Articles whose sales peak away from the recorded promo dates."""
         m = self.P.metrics
         return m[m["best_lag"].fillna(0) != 0]
+
+
+@dataclass(frozen=True)
+class ArticleContext:
+    """Article mode: one article (any number of accounts) and its anomaly analysis."""
+
+    asrc: tuple
+    article_id: str
+    demo: bool
+    promo_window: str
+    info: dict  # cid, promo_rows, secondary_rows, end
+    freq: str
+    unit: str
+    max_lag: int
+    sales: pd.DataFrame
+    R: dict  # anomalies.analyse()

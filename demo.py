@@ -22,7 +22,9 @@ def make_demo_data(n_products: int = 40, shift_days: int = -7, seed: int = 0):
     before_closed = np.roll(closed, -1) & ~closed
 
     # data problems: one system-wide outage, two lost days and two half-loaded days per
-    # account, and account 1406 stops sending data 20 days before the end
+    # account, and account 1406 stops sending data 20 days before the end.
+    # Article anomalies: 009707 halves from day 700 on (lost listing), 009711 sells
+    # nothing for three weeks from day 400 (stock-out)
     accounts = ["1404", "1405", "1406"]
     open_days = np.flatnonzero(~closed)
     outage = rng.choice(open_days[100:-60], 1)
@@ -53,6 +55,11 @@ def make_demo_data(n_products: int = 40, shift_days: int = -7, seed: int = 0):
             demand[s + length : s + length + 7] *= 0.8  # post-promo dip
         demand[closed] = 0
         qty = rng.poisson(demand)
+        # planted after sampling so the random stream (and all other ground truth) is unchanged
+        if i == 7:
+            qty[700:] = np.round(qty[700:] * 0.5)
+        if i == 11:
+            qty[400:421] = 0
         qty[np.r_[outage, lost[account]]] = 0
         if i % 2:
             qty[half[account]] = 0
