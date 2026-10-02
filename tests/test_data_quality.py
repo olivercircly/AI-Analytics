@@ -64,3 +64,16 @@ def test_backfill_before_onboarding(quality):
     backfill = a[a["kind"] == "backfill / re-import"]
     assert backfill["arrival"].nunique() == 1
     assert backfill["arrival"].iloc[0] == pd.Timestamp("2025-01-06")
+
+
+def test_outages_without_judged_days():
+    # e.g. a single selected virtual account with no usual volume yet: empty, not a TypeError
+    days = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01"]),
+            "location": pd.Series(["1"], dtype="str"),
+            "usual_qty": [0.0],
+            "flag": pd.Series([""], dtype="str"),
+        }
+    )
+    assert dq.system_outages(days).empty

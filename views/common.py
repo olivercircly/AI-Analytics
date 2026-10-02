@@ -23,6 +23,21 @@ def pct(x: float, signed: bool = False) -> str:
     return "–" if x is None or pd.isna(x) else (f"{x:+.0%}" if signed else f"{x:.0%}")
 
 
+def virtual_note(v: dict | None) -> str:
+    """Caption suffix describing the virtual-account rollup ('' when it is off)."""
+    if v is None:
+        return ""
+    if not v["stores"]:
+        return (
+            " No stores belong to a virtual account"
+            + (f" ({plural(v['defined'], 'virtual account')} defined, none with sales here)." if v["defined"] else ".")
+        )
+    return (
+        f" {plural(v['stores'], 'store')} rolled up into "
+        f"{plural(v['virtual_accounts'], 'virtual account')}."
+    )
+
+
 @dataclass(frozen=True)
 class Context:
     """Sidebar settings plus the precomputed results every tab renders from."""
@@ -52,6 +67,7 @@ class Context:
     P: an.Result  # promotions
     H: pd.DataFrame  # holiday effects, whole portfolio
     Q: dict  # data quality
+    O: dict | None = None  # article overlap of virtual accounts (rollup on)
 
     @property
     def shifted(self) -> pd.DataFrame:

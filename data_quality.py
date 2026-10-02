@@ -108,9 +108,12 @@ def account_summary(days: pd.DataFrame, silent_after: int = 7) -> pd.DataFrame:
 def system_outages(days: pd.DataFrame, min_share: float = 0.5) -> pd.DataFrame:
     """Days where at least `min_share` of accounts that normally trade are missing."""
     judged = days[days["usual_qty"] > 0]
-    by_day = judged.groupby("date").agg(
-        accounts=("location", "size"),
-        missing=("flag", lambda f: (f == "missing").sum()),
+    # a boolean sum, not a lambda agg: that keeps the str dtype when `judged` is empty
+    by_day = pd.DataFrame(
+        {
+            "accounts": judged.groupby("date").size(),
+            "missing": (judged["flag"] == "missing").groupby(judged["date"]).sum(),
+        }
     )
     by_day = by_day[
         (by_day["accounts"] >= 2)

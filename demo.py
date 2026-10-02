@@ -80,6 +80,18 @@ def make_demo_data(n_products: int = 40, shift_days: int = -7, seed: int = 0):
     )
 
 
+def make_demo_virtual() -> pd.DataFrame:
+    """Like VIRTUAL_ACCOUNTS_SQL: stores 1404 and 1405 belong to virtual account 1400."""
+    return pd.DataFrame(
+        {
+            "v_accountId": "1400",
+            "v_externalAccountId": "V-1400",
+            "r_accountId": ["1404", "1405"],
+            "r_externalAccountId": ["S-1404", "S-1405"],
+        }
+    )
+
+
 def make_demo_quality(
     sales: pd.DataFrame, onboarded: str = "2025-01-06", seed: int = 0
 ) -> pd.DataFrame:

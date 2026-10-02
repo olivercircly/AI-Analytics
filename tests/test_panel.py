@@ -82,3 +82,10 @@ def test_promo_days_counted_per_week():
         pd.Timestamp("2024-01-08"): 3,
         pd.Timestamp("2024-01-15"): 0,
     }
+
+
+def test_less_than_a_week_gives_an_empty_weekly_panel(sales, promos):
+    short = sales[sales["date"] >= sales["date"].max() - pd.Timedelta(days=2)]
+    p = an.build_panel(short, promos, an.Settings(freq="W-MON"))
+    assert p.empty
+    assert {"period", "qty", "promo_days", "promo", "series"} <= set(p.columns)

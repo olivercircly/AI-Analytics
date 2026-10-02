@@ -8,7 +8,17 @@ import pandas as pd
 import streamlit as st
 
 import anomalies as ab
-from views.common import BLUE, GREY, INK, ORANGE, RED, WINDOWS, ArticleContext, pct, plural
+from views.common import (
+    BLUE,
+    GREY,
+    INK,
+    ORANGE,
+    RED,
+    ArticleContext,
+    pct,
+    plural,
+    virtual_note,
+)
 
 KIND_COLORS = {
     "spike": RED,
@@ -155,13 +165,16 @@ def render(ctx: ArticleContext) -> None:
         f"{sales['date'].min():%d %b %Y} to {sales['date'].max():%d %b %Y} · "
         f"{plural(info['promo_rows'], 'promotion row')}"
         + (
-            f" ({WINDOWS[ctx.promo_window].lower()})"
+            f" ({ctx.promo_window} window)"
             if info["promo_rows"]
             else ""
         )
+        + "."
+        + virtual_note(info.get("virtual"))
     )
     if not ctx.demo and info["cid"]:
-        st.markdown(f"[Open the customer view for {info['cid']}](?cid={info['cid']})")
+        virtual = "&virtual=1" if info.get("virtual") is not None else ""
+        st.markdown(f"[Open the customer view for {info['cid']}](?cid={info['cid']}{virtual})")
 
     wt = weekly.set_index("period")["qty"]
     last52 = wt.iloc[-52:].sum()

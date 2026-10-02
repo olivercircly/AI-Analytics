@@ -107,6 +107,33 @@ ARTICLE_PROMO_SQL = sa.text(f"""
       AND p.deleted_at IS NULL
 """)
 
+# Virtual accounts roll up real stores. There is no foreign key: a virtual account's
+# accountCompanyName is the stores' name with a one-character marker prefix. Real
+# accounts are restricted to the same customer, so equally named accounts of other
+# customers can't match. Sales are only ever booked on real stores.
+VIRTUAL_ACCOUNTS_SQL = sa.text(f"""
+    WITH virtual_accounts_base AS (
+        SELECT
+            a1.id                                   AS v_accountId,
+            a1.externalAccountID                    AS v_externalAccountId,
+            SUBSTRING(a1.accountCompanyName, 2, 20) AS base_account_company_name
+        FROM {SCHEMA}.accounts AS a1
+        WHERE a1.cid = :cid
+          AND a1.isVirtual = 1
+          AND a1.accountCompanyName IS NOT NULL
+    )
+    SELECT
+        CAST(vab.v_accountId AS CHAR)               AS v_accountId,
+        vab.v_externalAccountId,
+        CAST(a.id AS CHAR)                          AS r_accountId,
+        a.externalAccountID                         AS r_externalAccountId
+    FROM virtual_accounts_base AS vab
+    JOIN {SCHEMA}.accounts AS a
+      ON a.accountCompanyName = vab.base_account_company_name
+     AND a.cid = :cid
+     AND COALESCE(a.isVirtual, 0) = 0
+""")
+
 PROMO_WINDOWS = {
     "primary": "Primary (validFrom–validTo)",
     "secondary": "Secondary (retail promo period)",
@@ -181,6 +208,12 @@ def load_article(article_id: str, start: date) -> tuple[pd.DataFrame, pd.DataFra
     promos["product"] = promos["product"].astype(str)
     promos["location"] = promos["location"].where(promos["location"].notna(), None)
     return df[["date", "product", "article_number", "location", "qty"]], promos, cid
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading virtual accounts…")
+def load_virtual_accounts(cid: str) -> pd.DataFrame:
+    """One row per (virtual account, real store) pair; empty without virtual accounts."""
+    return _read(VIRTUAL_ACCOUNTS_SQL, cid=cid)
 
 
 def select_window(promos: pd.DataFrame, window: str) -> pd.DataFrame:

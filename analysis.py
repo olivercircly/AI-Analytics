@@ -71,6 +71,85 @@ def to_period(dates: pd.Series, freq: str) -> pd.Series:
     return dates - pd.to_timedelta(dates.dt.weekday, unit="D")
 
 
+def virtual_groups(mapping: pd.DataFrame) -> dict[str, str]:
+    """Store accountId -> label of its virtual account, from VIRTUAL_ACCOUNTS_SQL rows
+    (v_accountId, v_externalAccountId, r_accountId). A store matching several virtual
+    accounts goes to the one with the lowest id."""
+    if mapping.empty:
+        return {}
+    m = mapping.astype({"v_accountId": str, "r_accountId": str})
+    m = m.sort_values("v_accountId").drop_duplicates("r_accountId")
+    label = m["v_accountId"] + " (virtual " + m["v_externalAccountId"].astype(str) + ")"
+    return dict(zip(m["r_accountId"], label))
+
+
+def roll_up_accounts(
+    sales: pd.DataFrame, promos: pd.DataFrame, groups: dict[str, str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Reassign accounts to the group they belong to (e.g. stores to their virtual
+    account), in sales and in account-specific promos. Accounts without a group keep
+    their own id; promos for all accounts (location missing) stay as they are."""
+    loc = sales["location"]
+    sales = sales.assign(location=loc.map(groups).fillna(loc))
+    if len(promos):
+        ploc = promos["location"]  # missing = all accounts, and stays missing
+        promos = promos.assign(location=ploc.map(groups).fillna(ploc))
+    return sales, promos
+
+
+OUTSIDE = "not in a virtual account"
+
+
+def article_overlap(sales: pd.DataFrame, groups: list[str]) -> dict:
+    """Are the `groups` (location labels, e.g. virtual accounts after roll_up_accounts)
+    disjoint in the articles they sell? An article counts as sold in a group if it has
+    positive sales there; locations outside `groups` are pooled as OUTSIDE.
+
+    articles: product, groups (how many of `groups` sell it), where, outside, volume
+    accounts: location, articles, exclusive (sold in no other group), shared, volume,
+              shared_volume_share
+    pairs:    a, b, shared (articles sold in both; a == b: all of a's articles), jaccard;
+              OUTSIDE is included here, but not in `groups` or `exclusive`
+    """
+    s = sales[sales["qty"] > 0]
+    loc = s["location"].where(s["location"].isin(groups), OUTSIDE)
+    vol = s.groupby([s["product"], loc.rename("location")])["qty"].sum().reset_index()
+    inside = vol[vol["location"] != OUTSIDE]
+
+    per = inside.groupby("product").agg(
+        groups=("location", "size"), where=("location", lambda x: ", ".join(sorted(x)))
+    )
+    articles = (
+        vol.groupby("product")["qty"].sum().rename("volume").to_frame()
+        .join(per, how="left")
+        .fillna({"groups": 0, "where": ""})
+        .astype({"groups": int})
+    )
+    articles["outside"] = articles.index.isin(vol.loc[vol["location"] == OUTSIDE, "product"])
+    articles = articles.reset_index()[["product", "groups", "where", "outside", "volume"]]
+    articles = articles.sort_values(["groups", "volume"], ascending=False, ignore_index=True)
+
+    shared = inside["product"].map(per["groups"]) > 1
+    accounts = (
+        inside.assign(shared=shared, shared_qty=inside["qty"].where(shared, 0.0))
+        .groupby("location")
+        .agg(articles=("product", "size"), shared=("shared", "sum"),
+             volume=("qty", "sum"), shared_qty=("shared_qty", "sum"))
+    )
+    accounts["exclusive"] = accounts["articles"] - accounts["shared"]
+    accounts["shared_volume_share"] = accounts["shared_qty"] / accounts["volume"]
+    accounts = accounts.reset_index()[
+        ["location", "articles", "exclusive", "shared", "volume", "shared_volume_share"]
+    ].sort_values("volume", ascending=False, ignore_index=True)
+
+    pairs = vol[["product", "location"]].merge(vol[["product", "location"]], on="product")
+    pairs = pairs.groupby(["location_x", "location_y"]).size().rename("shared").reset_index()
+    pairs.columns = ["a", "b", "shared"]
+    n = vol.groupby("location").size()
+    pairs["jaccard"] = pairs["shared"] / (n[pairs["a"]].values + n[pairs["b"]].values - pairs["shared"])
+    return {"articles": articles, "accounts": accounts, "pairs": pairs}
+
+
 # --------------------------------------------------------------------------- panel
 
 
@@ -137,6 +216,8 @@ def build_panel(sales: pd.DataFrame, promos: pd.DataFrame, s: Settings) -> pd.Da
         # Saturday (many shops are closed on Sundays, so there may be no Sunday rows)
         lo, hi = sales["date"].min(), sales["date"].max()
         agg = agg[(agg["period"] >= lo) & (agg["period"] + pd.Timedelta(days=5) <= hi)]
+    if agg.empty:  # e.g. less than one complete week of sales
+        return agg.assign(promo_days=0.0, promo=False, series="")
 
     # complete grid: missing periods are zero sales, but only between first and last sale
     periods = pd.date_range(agg["period"].min(), agg["period"].max(), freq=s.freq)
